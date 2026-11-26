@@ -59,17 +59,19 @@ Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$($RepoRoot.Replace('"', '""'))"
 WshShell.Run """$EscapedNode"" ""$EscapedDaemon""", 0, False
 "@
-Set-Content -Path $VbsPath -Value $VbsContent -Encoding ASCII
+Set-Content -Path $VbsPath -Value $VbsContent -Encoding Unicode
 
 $WshShell = New-Object -ComObject WScript.Shell
 
 # Ensure Antigravity shortcuts include --remote-debugging-port=0 (required on Antigravity v2.33.0+)
 $ShortcutSearchDirs = @(
     [Environment]::GetFolderPath('DesktopDirectory'),
+    [Environment]::GetFolderPath('CommonDesktopDirectory'),
     [Environment]::GetFolderPath('Programs'),
+    [Environment]::GetFolderPath('CommonPrograms'),
     [Environment]::GetFolderPath('Startup'),
     (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar')
-) | Where-Object { $_ -and (Test-Path $_) }
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
 
 foreach ($SearchDir in $ShortcutSearchDirs) {
     Get-ChildItem -Path $SearchDir -Recurse -Filter '*.lnk' -ErrorAction SilentlyContinue | ForEach-Object {

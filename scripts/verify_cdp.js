@@ -45,7 +45,7 @@ function resolvePortFile() {
 
 function fetchJson(url) {
     return new Promise((resolve, reject) => {
-        http.get(url, { timeout: 2500 }, (res) => {
+        const req = http.get(url, { timeout: 2500 }, (res) => {
             let body = '';
             res.on('data', (c) => {
                 body += c;
@@ -57,7 +57,9 @@ function fetchJson(url) {
                     reject(err);
                 }
             });
-        }).on('error', reject);
+        });
+        req.on('timeout', () => req.destroy(new Error('HTTP timeout')));
+        req.on('error', reject);
     });
 }
 
@@ -105,13 +107,13 @@ function evaluatePage(wsUrl, expression) {
 const INSPECT_EXPR = `(() => {
     const styleEl = document.getElementById('antigravity-custom-theme-active');
     const shellEl = document.querySelector('.agy-shell');
-    const mainGrid = document.querySelector('div.flex.h-full.flex-col.overflow-hidden.relative > div.flex.flex-1.flex-row.overflow-hidden.relative');
     const projPill = document.querySelector('[data-testid="project-selector-trigger"]');
     const envPill = document.querySelector('[aria-label="Select Environment"]');
     const scrollers = Array.from(document.querySelectorAll('.overflow-y-auto, [data-main-content-body], [data-side-panel-body]'));
     const liveBlurScrollers = scrollers.filter((el) => /blur\\(/i.test(getComputedStyle(el).backdropFilter || ''));
     const shellBackdrop = shellEl ? (getComputedStyle(shellEl).backdropFilter || 'none') : 'none';
     const hasLiveBlurRule = /blur\\(/i.test(shellBackdrop) || liveBlurScrollers.length > 0;
+    const prebakedGlassPresent = shellEl ? Boolean(shellEl.style.getPropertyValue('--agy-l-glass-bg')) : false;
     return {
         url: location.href,
         viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -119,16 +121,16 @@ const INSPECT_EXPR = `(() => {
         activeTheme: localStorage.getItem('agy_theme_v3') || null,
         shellFound: Boolean(shellEl),
         shellBgImagePresent: shellEl ? getComputedStyle(shellEl).backgroundImage !== 'none' : false,
+        prebakedGlassPresent,
         hasBrowserHole: document.body.dataset.hasBrowserHole || null,
         shellHoleActive: shellEl ? shellEl.getAttribute('data-agy-hole-active') : null,
-        mainGridFound: Boolean(mainGrid),
         projectPillBg: projPill ? getComputedStyle(projPill).backgroundColor : null,
         envPillBg: envPill ? getComputedStyle(envPill).backgroundColor : null,
         scrollerCount: scrollers.length,
         liveBlurScrollerCount: liveBlurScrollers.length,
         hasLiveBlurRule,
         settingsTriggerPresent: Boolean(document.getElementById('agy-custom-theme-sidebar-btn')),
-        composerPresent: Boolean(document.querySelector('div.relative.flex.flex-col.rounded-lg.border')),
+        composerPresent: Boolean(document.querySelector('.surface-composer')),
     };
 })()`;
 
@@ -141,9 +143,12 @@ async function main() {
 
     const port = parseInt(fs.readFileSync(portFile, 'utf8').trim().split(/\r?\n/)[0], 10);
     const targets = await fetchJson(`http://127.0.0.1:${port}/json`);
-    const pages = (Array.isArray(targets) ? targets : []).filter(
-        (t) => t && t.type === 'page' && t.webSocketDebuggerUrl && String(t.url || '').includes('127.0.0.1')
-    );
+    const pages = (Array.isArray(targets) ? targets : []).filter((t) => {
+        if (!t || t.type !== 'page' || !t.webSocketDebuggerUrl) return false;
+        const url = String(t.url || '');
+        if (url.startsWith('devtools://') || url.startsWith('chrome-extension://')) return false;
+        return url.includes('127.0.0.1') || url.includes('workbench') || url.includes('launchpad');
+    });
 
     if (pages.length === 0) {
         console.error(`[verify-cdp] No Antigravity CDP page targets found on port ${port}.`);

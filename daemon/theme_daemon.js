@@ -197,9 +197,25 @@ function createSession(target) {
         });
     }
 
+    session.preloadScriptId = null;
+
+    async function syncPreloadScript(src) {
+        try {
+            if (session.preloadScriptId) {
+                await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: session.preloadScriptId }).catch(() => {});
+                session.preloadScriptId = null;
+            }
+            const res = await send('Page.addScriptToEvaluateOnNewDocument', { source: src });
+            if (res && res.identifier) {
+                session.preloadScriptId = res.identifier;
+            }
+        } catch (_) {}
+    }
+
     session.reinject = async () => {
         const src = buildInjectedSource();
         if (!src) return;
+        await syncPreloadScript(src);
         try {
             await send('Runtime.evaluate', { expression: src, awaitPromise: false });
         } catch (_) {}
@@ -251,7 +267,7 @@ function createSession(target) {
 
             const src = buildInjectedSource();
             if (src) {
-                await send('Page.addScriptToEvaluateOnNewDocument', { source: src });
+                await syncPreloadScript(src);
                 await send('Runtime.evaluate', { expression: src, awaitPromise: false });
             }
             log(`Attached target ${target.id} (${target.url})`);
@@ -271,7 +287,11 @@ function createSession(target) {
     ws.addEventListener('error', cleanup);
 }
 
+let isScanning = false;
 async function scanPages() {
+    if (isScanning) return;
+    isScanning = true;
+    try {
     const info = getPortInfo();
     if (!info) return;
 
@@ -314,6 +334,9 @@ async function scanPages() {
         if (!sessions.has(page.id)) {
             createSession(page);
         }
+    }
+    } finally {
+        isScanning = false;
     }
 }
 

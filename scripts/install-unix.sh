@@ -115,8 +115,8 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-WorkingDirectory=$REPO_ROOT
-ExecStart=$node_bin $DAEMON_JS
+WorkingDirectory="$REPO_ROOT"
+ExecStart="$node_bin" "$DAEMON_JS"
 Restart=always
 RestartSec=3
 

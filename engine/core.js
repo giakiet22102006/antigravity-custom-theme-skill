@@ -15,7 +15,7 @@
   const STORAGE_AVATAR_SIZE = 'agy_avatar_size_v3';
   const STORAGE_AVATAR_RADIUS = 'agy_avatar_radius_v3';
 
-  const CHECK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+  const CHECK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
   const INPUT_STYLES = {
     'sync': {
@@ -36,6 +36,25 @@
     }
   };
 
+  function escapeHtml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function safeCssUrl(url) {
+    return String(url || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/'/g, '%27');
+  }
+
+  function parseFiniteInt(val, fallback) {
+    if (val === undefined || val === null || val === '') return fallback;
+    const n = parseInt(val, 10);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
   function getState() {
     const init = window.__AGY_INITIAL_CONFIG__ || {};
     const rawTheme = localStorage.getItem(STORAGE_THEME) || init.themeName || DEFAULT_THEME_KEY;
@@ -43,20 +62,57 @@
     const rawBubble = localStorage.getItem(STORAGE_BUBBLE) || init.bubbleName || themeName;
     const bubbleName = THEMES[rawBubble] ? rawBubble : themeName;
     const inputStyle = localStorage.getItem(STORAGE_INPUT) || init.inputStyle || 'sync';
-    const dimming = parseInt(localStorage.getItem(STORAGE_DIMMING) || (init.dimming !== undefined ? init.dimming : '69'), 10);
+    const dimming = parseFiniteInt(localStorage.getItem(STORAGE_DIMMING) ?? init.dimming, 69);
     const wpEnabled = localStorage.getItem(STORAGE_WP_ENABLED) !== null
       ? localStorage.getItem(STORAGE_WP_ENABLED) !== 'false'
       : (init.wpEnabled !== undefined ? init.wpEnabled : true);
     const customWp = localStorage.getItem(STORAGE_CUSTOM_WP) || init.customWp || '';
     const userAvatar = localStorage.getItem(STORAGE_USER_AVATAR) ?? init.userAvatar ?? '';
     const agentAvatar = localStorage.getItem(STORAGE_AGENT_AVATAR) ?? init.agentAvatar ?? '';
-    const rawBlur = localStorage.getItem(STORAGE_GLASS_BLUR) ?? init.glassBlur;
-    const glassBlur = rawBlur !== undefined && rawBlur !== null && rawBlur !== '' ? parseInt(rawBlur, 10) : 3;
-    const rawAvSize = localStorage.getItem(STORAGE_AVATAR_SIZE) ?? init.avatarSize;
-    const avatarSize = rawAvSize !== undefined && rawAvSize !== null && rawAvSize !== '' ? parseInt(rawAvSize, 10) : 32;
-    const rawAvRad = localStorage.getItem(STORAGE_AVATAR_RADIUS) ?? init.avatarRadius;
-    const avatarRadius = rawAvRad !== undefined && rawAvRad !== null && rawAvRad !== '' ? parseInt(rawAvRad, 10) : 50;
+    const glassBlur = parseFiniteInt(localStorage.getItem(STORAGE_GLASS_BLUR) ?? init.glassBlur, 3);
+    const avatarSize = parseFiniteInt(localStorage.getItem(STORAGE_AVATAR_SIZE) ?? init.avatarSize, 32);
+    const avatarRadius = parseFiniteInt(localStorage.getItem(STORAGE_AVATAR_RADIUS) ?? init.avatarRadius, 50);
     return { themeName, bubbleName, inputStyle, dimming, wpEnabled, customWp, userAvatar, agentAvatar, glassBlur, avatarSize, avatarRadius };
+  }
+
+  // Downscale custom wallpaper uploads to max 2560px WebP so localStorage (5MB limit) & theme_config.json stay fast
+  function compressWallpaperFile(file, callback) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawUrl = String(reader.result || '');
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const maxDim = 2560;
+          const natW = img.naturalWidth || 1920;
+          const natH = img.naturalHeight || 1080;
+          const longest = Math.max(natW, natH);
+          const scale = longest > maxDim ? maxDim / longest : 1;
+          const w = Math.max(1, Math.round(natW * scale));
+          const h = Math.max(1, Math.round(natH * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            callback(rawUrl);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          const out = canvas.toDataURL('image/webp', 0.86);
+          if (out && out.startsWith('data:image/webp') && (scale < 1 || out.length < rawUrl.length)) {
+            callback(out);
+          } else {
+            callback(rawUrl);
+          }
+        } catch (e) {
+          callback(rawUrl);
+        }
+      };
+      img.onerror = () => callback(rawUrl);
+      img.src = rawUrl;
+    };
+    reader.readAsDataURL(file);
   }
 
   // Downscale user/agent avatar uploads to 192x192 WebP once so theme_config.json stays tiny
@@ -93,6 +149,7 @@
   function syncPrebakedGlass(wpUrl, overlayRgb, overlayAlpha, tintBg, blurStr) {
     const shell = document.querySelector('.agy-shell');
     if (!wpUrl) {
+      window.__AGY_LAST_GLASS__ = null;
       if (shell) shell.style.removeProperty('--agy-l-glass-bg');
       return;
     }
@@ -100,9 +157,11 @@
     window.__AGY_BLUR_CACHE__ = window.__AGY_BLUR_CACHE__ || {};
     const cached = window.__AGY_BLUR_CACHE__[key];
     if (cached) {
+      window.__AGY_LAST_GLASS__ = { key, url: cached };
       if (shell) shell.style.setProperty('--agy-l-glass-bg', 'url("' + cached + '")');
       return;
     }
+    window.__AGY_LAST_GLASS__ = { key, url: null };
     const img = new Image();
     img.onload = () => {
       try {
@@ -126,8 +185,11 @@
         }
         const baked = canvas.toDataURL('image/webp', 0.85);
         window.__AGY_BLUR_CACHE__[key] = baked;
-        const curShell = document.querySelector('.agy-shell');
-        if (curShell) curShell.style.setProperty('--agy-l-glass-bg', 'url("' + baked + '")');
+        if (window.__AGY_LAST_GLASS__ && window.__AGY_LAST_GLASS__.key === key) {
+          window.__AGY_LAST_GLASS__.url = baked;
+          const curShell = document.querySelector('.agy-shell');
+          if (curShell) curShell.style.setProperty('--agy-l-glass-bg', 'url("' + baked + '")');
+        }
       } catch (e) {}
     };
     img.src = wpUrl;
@@ -174,11 +236,13 @@
     const oldLegacy = document.getElementById('antigravity-ho-ly-chibi-theme');
     if (oldLegacy) oldLegacy.remove();
 
+    const styleRoot = document.head || document.documentElement;
+    if (!styleRoot) return;
     let styleEl = document.getElementById('antigravity-custom-theme-active');
     if (!styleEl) {
       styleEl = document.createElement('style');
       styleEl.id = 'antigravity-custom-theme-active';
-      document.head.appendChild(styleEl);
+      styleRoot.appendChild(styleEl);
     }
 
     const overlayAlpha = mainTheme.clearBackdrop
@@ -253,7 +317,7 @@
         box-shadow: none !important;
       }
       body[data-has-browser-hole="true"] .agy-shell[data-agy-hole-active="1"] [data-split-sash] {
-        background: rgba(56, 189, 248, 0.14) !important;
+        background: ${mainTheme.borderColor || 'rgba(56, 189, 248, 0.14)'} !important;
         background-image: none !important;
       }
     ` : `
@@ -920,9 +984,26 @@
 
   function removeCustomTheme() {
     clearTitleBarTimers();
+    if (window.__AGY_TICK_RAF__) {
+      cancelAnimationFrame(window.__AGY_TICK_RAF__);
+      window.__AGY_TICK_RAF__ = 0;
+    }
+    if (window.__AGY_MODAL_OBSERVER__) {
+      try { window.__AGY_MODAL_OBSERVER__.disconnect(); } catch (e) {}
+      window.__AGY_MODAL_OBSERVER__ = null;
+    }
+    if (window.__AGY_SHELL_RO__) {
+      try { window.__AGY_SHELL_RO__.disconnect(); } catch (e) {}
+      window.__AGY_SHELL_RO__ = null;
+    }
     if (window.__AGY_SCROLL_AC__) {
       try { window.__AGY_SCROLL_AC__.abort(); } catch (e) {}
+      window.__AGY_SCROLL_AC__ = null;
     }
+    window.__AGY_LAST_GLASS__ = null;
+    window.__AGY_HOLE_EL__ = null;
+    window.__AGY_SIDE_EL__ = null;
+    window.__AGY_SIDEBAR_PANE_EL__ = null;
     const styleEl = document.getElementById('antigravity-custom-theme-active');
     if (styleEl) styleEl.remove();
     const navBtn = document.getElementById('agy-custom-theme-sidebar-btn');
@@ -931,11 +1012,18 @@
     if (settingsBtn) settingsBtn.remove();
     const modal = document.getElementById('agy-custom-theme-modal-backdrop');
     if (modal) modal.remove();
+    document.querySelectorAll('[data-agy-scroll-bound]').forEach(el => {
+      delete el.dataset.agyScrollBound;
+      el.classList.remove('agy-scrolled');
+    });
     const shell = document.querySelector('.agy-shell');
     if (shell) {
       delete shell.dataset.agyHoleActive;
-      shell.style.removeProperty('--agy-hole-clip');
-      shell.style.removeProperty('--agy-l-glass-bg');
+      delete shell.dataset.agySideGlass;
+      delete shell.dataset.agyTboMounted;
+      ['--agy-hole-clip', '--agy-l-glass-bg', '--agy-sidebar-w', '--agy-hdr-h', '--agy-side-l', '--agy-side-t', '--agy-side-r', '--agy-side-b'].forEach(prop => {
+        shell.style.removeProperty(prop);
+      });
     }
     if (window.electronNative && typeof window.electronNative.setTitleBarOverlay === 'function') {
       try {
@@ -948,9 +1036,10 @@
   window.__ANTIGRAVITY_REMOVE_CUSTOM_THEME__ = removeCustomTheme;
   window.__ANTIGRAVITY_OPEN_THEME_MODAL__ = openCustomThemeModal;
 
-  applyTheme();
-
   function openCustomThemeModal() {
+    const stInit = getState();
+    const initTheme = THEMES[stInit.themeName] || THEMES[DEFAULT_THEME_KEY] || {};
+    const modalLight = Boolean(initTheme.isLight);
     let backdrop = document.getElementById('agy-custom-theme-modal-backdrop');
     if (!backdrop) {
       backdrop = document.createElement('div');
@@ -969,12 +1058,12 @@
 
       backdrop.innerHTML = `
         <div id="agy-custom-theme-modal-dialog" style="background: rgba(16, 12, 11, 0.97); border: 1.2px solid rgba(212, 148, 106, 0.35); border-radius: 18px; width: 100%; max-width: 900px; height: 86vh; max-height: 860px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.9), 0 0 32px rgba(224, 142, 85, 0.25); font-family: system-ui, -apple-system, sans-serif;">
-          <div id="agy-custom-theme-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 18px 26px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); background: rgba(22, 16, 14, 0.85);">
+          <div id="agy-custom-theme-modal-header" style="display: flex; justify-content: space-between; align-items: center; padding: 18px 26px; border-bottom: 1px solid ${modalLight ? 'rgba(15, 23, 42, 0.10)' : 'rgba(255, 255, 255, 0.08)'}; background: rgba(22, 16, 14, 0.85);">
             <div style="display: flex; align-items: center; gap: 10px;">
-              <span style="font-size: 17px; font-weight: 600; color: #f4f4f5; letter-spacing: -0.2px;">Custom Theme Studio</span>
+              <span id="agy-theme-modal-title" style="font-size: 17px; font-weight: 600; color: ${modalLight ? '#0f172a' : '#f4f4f5'}; letter-spacing: -0.2px;">Custom Theme Studio</span>
               <span id="agy-custom-theme-badge" style="font-size: 11.5px; padding: 2.5px 9px; border-radius: 9999px; background: rgba(224, 142, 85, 0.2); color: #e08e55; font-weight: 500; border: 1px solid rgba(224, 142, 85, 0.3);">${THEME_KEYS.length} Preset${THEME_KEYS.length > 1 ? 's' : ''}</span>
             </div>
-            <button id="agy-theme-modal-close-btn" type="button" style="background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); color: #d4d4d8; cursor: pointer; width: 30px; height: 30px; border-radius: 8px; font-size: 15px; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;">✕</button>
+            <button id="agy-theme-modal-close-btn" type="button" style="background: ${modalLight ? 'rgba(15, 23, 42, 0.06)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${modalLight ? 'rgba(15, 23, 42, 0.14)' : 'rgba(255, 255, 255, 0.1)'}; color: ${modalLight ? '#334155' : '#d4d4d8'}; cursor: pointer; width: 30px; height: 30px; border-radius: 8px; font-size: 15px; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;">✕</button>
           </div>
           <div id="agy-theme-modal-body" style="flex: 1; overflow-y: auto; height: 100%;"></div>
         </div>
@@ -988,11 +1077,12 @@
       backdrop.querySelector('#agy-theme-modal-close-btn').addEventListener('click', () => {
         backdrop.style.display = 'none';
       });
+      const keyOpts = window.__AGY_SCROLL_AC__ ? { signal: window.__AGY_SCROLL_AC__.signal } : undefined;
       window.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && backdrop.style.display !== 'none') {
           backdrop.style.display = 'none';
         }
-      });
+      }, keyOpts);
     }
 
     backdrop.style.display = 'flex';
@@ -1005,86 +1095,108 @@
     const mainTheme = THEMES[st.themeName] || THEMES[DEFAULT_THEME_KEY];
     const effUserAv = st.userAvatar === 'none' ? '' : (st.userAvatar || mainTheme.userAvatar || '');
     const effAgentAv = st.agentAvatar === 'none' ? '' : (st.agentAvatar || mainTheme.agentAvatar || '');
+    const isLightModal = Boolean(mainTheme.isLight);
+    const mText = isLightModal ? '#0f172a' : '#f4f4f5';
+    const mHeading = isLightModal ? '#0f172a' : '#ffffff';
+    const mLabel = isLightModal ? '#334155' : '#d4d4d8';
+    const mMuted = isLightModal ? '#475569' : '#a1a1aa';
+    const mDivider = isLightModal ? 'rgba(15, 23, 42, 0.10)' : 'rgba(255, 255, 255, 0.08)';
+    const mBorder = isLightModal ? 'rgba(15, 23, 42, 0.14)' : 'rgba(255, 255, 255, 0.12)';
+    const mBtnBg = isLightModal ? 'rgba(15, 23, 42, 0.06)' : 'rgba(255, 255, 255, 0.08)';
+    const mCardBg = mainTheme.cardBg || (isLightModal ? 'rgba(255, 255, 255, 0.84)' : 'rgba(14, 12, 12, 0.78)');
+    const mCardSelBg = mainTheme.cardSelectedBg || (isLightModal ? 'rgba(226, 232, 240, 0.90)' : 'rgba(42, 34, 30, 0.68)');
+    const mCardSelBorder = isLightModal ? `1.5px solid ${mainTheme.primary}` : '1.5px solid #f4f4f5';
+    const mInputBg = isLightModal ? 'rgba(15, 23, 42, 0.05)' : 'rgba(0, 0, 0, 0.35)';
+    const modalTitleEl = document.getElementById('agy-theme-modal-title');
+    if (modalTitleEl) modalTitleEl.style.color = mText;
+    const modalHeaderEl = document.getElementById('agy-custom-theme-modal-header');
+    if (modalHeaderEl) modalHeaderEl.style.borderBottomColor = mDivider;
+    const modalCloseEl = document.getElementById('agy-theme-modal-close-btn');
+    if (modalCloseEl) {
+      modalCloseEl.style.background = mBtnBg;
+      modalCloseEl.style.borderColor = mBorder;
+      modalCloseEl.style.color = mLabel;
+    }
 
     container.innerHTML = `
-      <div id="agy-theme-scroll-container" style="padding: 24px 32px 48px 32px; max-width: 860px; margin: 0 auto; overflow-y: auto; height: 100%; color: #f4f4f5;">
-        <div style="border: 1px solid ${mainTheme.borderColor}; background: ${mainTheme.cardBg || 'rgba(22, 16, 14, 0.72)'}; border-radius: 12px; padding: 16px 20px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 12px;">
+      <div id="agy-theme-scroll-container" style="padding: 24px 32px 48px 32px; max-width: 860px; margin: 0 auto; overflow-y: auto; height: 100%; color: ${mText};">
+        <div style="border: 1px solid ${mainTheme.borderColor}; background: ${mCardBg}; border-radius: 12px; padding: 16px 20px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 12px;">
           <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
             <div>
-              <div style="font-size: 14.5px; font-weight: 600; color: #f4f4f5; margin-bottom: 2px;">Wallpaper, Pre-Baked Blur & Config</div>
-              <div style="font-size: 12.5px; color: #a1a1aa;">Balance artwork clarity, 120fps pre-baked frosted glass blur, or share config JSON.</div>
+              <div style="font-size: 14.5px; font-weight: 600; color: ${mText}; margin-bottom: 2px;">Wallpaper, Pre-Baked Blur & Config</div>
+              <div style="font-size: 12.5px; color: ${mMuted};">Balance artwork clarity, 120fps pre-baked frosted glass blur, or share config JSON.</div>
             </div>
             <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-              <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #d4d4d8; cursor: pointer;">
+              <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: ${mLabel}; cursor: pointer;">
                 <input id="agy-wp-toggle" type="checkbox" ${st.wpEnabled ? 'checked' : ''} style="accent-color: ${mainTheme.primary}; cursor: pointer;" />
                 Backdrop
               </label>
-              <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #a1a1aa;">
+              <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: ${mMuted};">
                 Dim
-                <input id="agy-dim-slider" type="range" min="15" max="92" value="${st.dimming}" style="width: 96px; cursor: pointer; accent-color: #ffffff; height: 5px;" />
+                <input id="agy-dim-slider" type="range" min="15" max="92" value="${st.dimming}" style="width: 96px; cursor: pointer; accent-color: ${isLightModal ? mainTheme.primary : '#ffffff'}; height: 5px;" />
                 <span id="agy-dim-val" style="min-width: 32px; text-align: right;">${st.dimming}%</span>
               </label>
-              <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #a1a1aa;">
+              <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: ${mMuted};">
                 Blur
                 <input id="agy-blur-slider" type="range" min="0" max="16" value="${st.glassBlur}" style="width: 78px; cursor: pointer; accent-color: ${mainTheme.primary}; height: 5px;" />
                 <span id="agy-blur-val" style="min-width: 30px; text-align: right;">${st.glassBlur}px</span>
               </label>
-              <label style="padding: 5px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); border: 1px solid ${mainTheme.borderColor}; color: #f4f4f5; font-size: 12px; cursor: pointer; white-space: nowrap;">
+              <label style="padding: 5px 10px; border-radius: 8px; background: ${mBtnBg}; border: 1px solid ${mainTheme.borderColor}; color: ${mText}; font-size: 12px; cursor: pointer; white-space: nowrap;">
                 Custom Image
                 <input id="agy-wp-upload" type="file" accept="image/*" style="display: none;" />
               </label>
-              <button id="agy-export-btn" type="button" style="padding: 5px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.16); color: #f4f4f5; font-size: 12px; cursor: pointer; white-space: nowrap;">
+              <button id="agy-export-btn" type="button" style="padding: 5px 10px; border-radius: 8px; background: ${mBtnBg}; border: 1px solid ${mBorder}; color: ${mText}; font-size: 12px; cursor: pointer; white-space: nowrap;">
                 Export JSON
               </button>
-              <button id="agy-import-toggle" type="button" style="padding: 5px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.16); color: #f4f4f5; font-size: 12px; cursor: pointer; white-space: nowrap;">
+              <button id="agy-import-toggle" type="button" style="padding: 5px 10px; border-radius: 8px; background: ${mBtnBg}; border: 1px solid ${mBorder}; color: ${mText}; font-size: 12px; cursor: pointer; white-space: nowrap;">
                 Import JSON
               </button>
-              <button id="agy-reset-btn" type="button" style="padding: 5px 10px; border-radius: 8px; background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.35); color: #fca5a5; font-size: 12px; cursor: pointer; white-space: nowrap;">
+              <button id="agy-reset-btn" type="button" style="padding: 5px 10px; border-radius: 8px; background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.35); color: ${isLightModal ? '#b91c1c' : '#fca5a5'}; font-size: 12px; cursor: pointer; white-space: nowrap;">
                 Reset
               </button>
             </div>
           </div>
-          <div id="agy-import-box" style="display: none; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08);">
-            <textarea id="agy-import-text" rows="3" placeholder='Paste exported theme config JSON here (e.g. {"themeName":"WLOP Cosmic","dimming":45,...})' style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.35); color: #f4f4f5; border: 1px solid ${mainTheme.borderColor}; border-radius: 8px; padding: 8px 10px; font-family: monospace; font-size: 12px; resize: vertical;"></textarea>
+          <div id="agy-import-box" style="display: none; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid ${mDivider};">
+            <textarea id="agy-import-text" rows="3" placeholder='Paste exported theme config JSON here (e.g. {"themeName":"WLOP Cosmic","dimming":45,...})' style="width: 100%; box-sizing: border-box; background: ${mInputBg}; color: ${mText}; border: 1px solid ${mainTheme.borderColor}; border-radius: 8px; padding: 8px 10px; font-family: monospace; font-size: 12px; resize: vertical;"></textarea>
             <div style="display: flex; justify-content: flex-end; align-items: center; gap: 8px;">
-              <span id="agy-import-msg" style="font-size: 12px; color: #fca5a5;"></span>
+              <span id="agy-import-msg" style="font-size: 12px; color: ${isLightModal ? '#b91c1c' : '#fca5a5'};"></span>
               <button id="agy-import-apply" type="button" style="padding: 5px 12px; border-radius: 7px; background: ${mainTheme.primary}; color: #090d16; font-weight: 600; font-size: 12px; border: none; cursor: pointer;">Apply JSON</button>
             </div>
           </div>
         </div>
 
-        <div style="border: 1px solid ${mainTheme.borderColor}; background: ${mainTheme.cardBg || 'rgba(22, 16, 14, 0.72)'}; border-radius: 12px; padding: 14px 20px; margin-bottom: 24px; display: flex; flex-direction: column; gap: 10px;">
+        <div style="border: 1px solid ${mainTheme.borderColor}; background: ${mCardBg}; border-radius: 12px; padding: 14px 20px; margin-bottom: 24px; display: flex; flex-direction: column; gap: 10px;">
           <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
             <div>
-              <div style="font-size: 14px; font-weight: 600; color: #f4f4f5; margin-bottom: 2px;">Chat Avatars (User & AI Agent)</div>
-              <div style="font-size: 12px; color: #a1a1aa;">Profile badges rendered beside chat messages (auto-compressed WebP).</div>
+              <div style="font-size: 14px; font-weight: 600; color: ${mText}; margin-bottom: 2px;">Chat Avatars (User & AI Agent)</div>
+              <div style="font-size: 12px; color: ${mMuted};">Profile badges rendered beside chat messages (auto-compressed WebP).</div>
             </div>
             <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
               <div style="display: flex; align-items: center; gap: 8px;">
-                <div id="agy-user-av-preview" style="width: 30px; height: 30px; border-radius: ${st.avatarRadius}%; border: 1.5px solid ${mainTheme.primary}; background: rgba(255,255,255,0.06) ${effUserAv ? `url('${effUserAv}') center/cover no-repeat` : ''}; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #a1a1aa;">${effUserAv ? '' : 'U'}</div>
-                <label style="padding: 4px 10px; border-radius: 7px; background: rgba(255, 255, 255, 0.08); border: 1px solid ${mainTheme.borderColor}; color: #f4f4f5; font-size: 12px; cursor: pointer; white-space: nowrap;">
+                <div id="agy-user-av-preview" style="width: 30px; height: 30px; border-radius: ${st.avatarRadius}%; border: 1.5px solid ${mainTheme.primary}; background: ${mBtnBg} ${effUserAv ? `url('${safeCssUrl(effUserAv)}') center/cover no-repeat` : ''}; display: flex; align-items: center; justify-content: center; font-size: 11px; color: ${mMuted};">${effUserAv ? '' : 'U'}</div>
+                <label style="padding: 4px 10px; border-radius: 7px; background: ${mBtnBg}; border: 1px solid ${mainTheme.borderColor}; color: ${mText}; font-size: 12px; cursor: pointer; white-space: nowrap;">
                   User
                   <input id="agy-user-av-upload" type="file" accept="image/*" style="display: none;" />
                 </label>
-                <button id="agy-user-av-clear" type="button" style="padding: 4px 8px; border-radius: 7px; background: transparent; border: 1px solid rgba(255, 255, 255, 0.14); color: #a1a1aa; font-size: 11.5px; cursor: pointer;">Off</button>
+                <button id="agy-user-av-clear" type="button" style="padding: 4px 8px; border-radius: 7px; background: transparent; border: 1px solid ${mBorder}; color: ${mMuted}; font-size: 11.5px; cursor: pointer;">Off</button>
               </div>
               <div style="display: flex; align-items: center; gap: 8px;">
-                <div id="agy-agent-av-preview" style="width: 30px; height: 30px; border-radius: ${st.avatarRadius}%; border: 1.5px solid ${mainTheme.secondary || mainTheme.primary}; background: rgba(255,255,255,0.06) ${effAgentAv ? `url('${effAgentAv}') center/cover no-repeat` : ''}; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #a1a1aa;">${effAgentAv ? '' : 'AI'}</div>
-                <label style="padding: 4px 10px; border-radius: 7px; background: rgba(255, 255, 255, 0.08); border: 1px solid ${mainTheme.borderColor}; color: #f4f4f5; font-size: 12px; cursor: pointer; white-space: nowrap;">
+                <div id="agy-agent-av-preview" style="width: 30px; height: 30px; border-radius: ${st.avatarRadius}%; border: 1.5px solid ${mainTheme.secondary || mainTheme.primary}; background: ${mBtnBg} ${effAgentAv ? `url('${safeCssUrl(effAgentAv)}') center/cover no-repeat` : ''}; display: flex; align-items: center; justify-content: center; font-size: 11px; color: ${mMuted};">${effAgentAv ? '' : 'AI'}</div>
+                <label style="padding: 4px 10px; border-radius: 7px; background: ${mBtnBg}; border: 1px solid ${mainTheme.borderColor}; color: ${mText}; font-size: 12px; cursor: pointer; white-space: nowrap;">
                   Agent
                   <input id="agy-agent-av-upload" type="file" accept="image/*" style="display: none;" />
                 </label>
-                <button id="agy-agent-av-clear" type="button" style="padding: 4px 8px; border-radius: 7px; background: transparent; border: 1px solid rgba(255, 255, 255, 0.14); color: #a1a1aa; font-size: 11.5px; cursor: pointer;">Off</button>
+                <button id="agy-agent-av-clear" type="button" style="padding: 4px 8px; border-radius: 7px; background: transparent; border: 1px solid ${mBorder}; color: ${mMuted}; font-size: 11.5px; cursor: pointer;">Off</button>
               </div>
             </div>
           </div>
-          <div style="display: flex; align-items: center; gap: 20px; flex-wrap: wrap; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.07);">
-            <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a1a1aa;">
+          <div style="display: flex; align-items: center; gap: 20px; flex-wrap: wrap; padding-top: 6px; border-top: 1px solid ${mDivider};">
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: ${mMuted};">
               Size
               <input id="agy-av-size" type="range" min="22" max="52" value="${st.avatarSize}" style="width: 100px; cursor: pointer; accent-color: ${mainTheme.primary}; height: 5px;" />
               <span id="agy-av-size-val" style="min-width: 34px;">${st.avatarSize}px</span>
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a1a1aa;">
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: ${mMuted};">
               Corner Radius
               <input id="agy-av-rad" type="range" min="0" max="50" value="${st.avatarRadius}" style="width: 100px; cursor: pointer; accent-color: ${mainTheme.primary}; height: 5px;" />
               <span id="agy-av-rad-val" style="min-width: 34px;">${st.avatarRadius}%</span>
@@ -1093,27 +1205,28 @@
         </div>
 
         <div style="margin-bottom: 28px;">
-          <div style="font-size: 15px; font-weight: 600; color: #ffffff; margin-bottom: 4px;">User Chat Bubble</div>
-          <div style="font-size: 12.5px; color: #a1a1aa; margin-bottom: 14px;">Mix and match bubble frame & ornament independently from the active wallpaper.</div>
+          <div style="font-size: 15px; font-weight: 600; color: ${mHeading}; margin-bottom: 4px;">User Chat Bubble</div>
+          <div style="font-size: 12.5px; color: ${mMuted}; margin-bottom: 14px;">Mix and match bubble frame & ornament independently from the active wallpaper.</div>
           <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
             ${THEME_KEYS.map(name => {
               const th = THEMES[name];
+              const safeName = escapeHtml(name);
               const isSelected = name === st.bubbleName;
               const stickerTop = th.isOrnament ? Math.round((th.stickerTop || 0) * 0.85) : Math.round((th.stickerTop || 0) * 0.74);
               const stickerW = Math.round((th.stickerW || 0) * 0.78);
               const stickerH = th.isOrnament ? Math.round((th.stickerH || 0) * 0.8) : Math.round((th.stickerH || 0) * 0.78);
               return `
-                <div class="agy-bubble-card" data-name="${name}" style="position: relative; border-radius: 12px; border: ${isSelected ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)'}; background: ${isSelected ? 'rgba(42, 34, 30, 0.68)' : 'rgba(14, 12, 12, 0.78)'}; padding: 24px 18px 14px 18px; cursor: pointer; display: flex; flex-direction: column; justify-content: space-between; min-height: 112px; transition: border-color 0.15s ease, background-color 0.15s ease;">
+                <div class="agy-bubble-card" data-name="${safeName}" style="position: relative; border-radius: 12px; border: ${isSelected ? mCardSelBorder : '1px solid ' + mBorder}; background: ${isSelected ? mCardSelBg : mCardBg}; padding: 24px 18px 14px 18px; cursor: pointer; display: flex; flex-direction: column; justify-content: space-between; min-height: 112px; transition: border-color 0.15s ease, background-color 0.15s ease;">
                   <div style="display: flex; justify-content: center; align-items: center; width: 100%; margin-top: 6px; margin-bottom: 10px;">
                     <div style="position: relative; width: 192px; height: 46px; padding: 1.2px; border-radius: ${th.isScroll ? '6px' : '12px'}; background: ${th.frameBg}; box-shadow: 0 4px 14px rgba(0,0,0,0.45), 0 0 10px ${th.glow};">
                       <div style="position: relative; width: 100%; height: 100%; background: ${th.bg}; border: ${th.innerBorder || '1px solid ' + th.borderColor}; border-radius: ${th.isScroll ? '4px' : '11px'}; display: flex; align-items: center; padding: 0 16px;">
-                        ${th.sticker ? `<div style="position: absolute; top: ${stickerTop}px; right: 8px; width: ${stickerW}px; height: ${stickerH}px; background-image: url('${th.sticker}'); background-size: contain; background-position: ${th.isOrnament ? 'center' : 'bottom center'}; background-repeat: no-repeat; pointer-events: none;"></div>` : ''}
+                        ${th.sticker ? `<div style="position: absolute; top: ${stickerTop}px; right: 8px; width: ${stickerW}px; height: ${stickerH}px; background-image: url('${safeCssUrl(th.sticker)}'); background-size: contain; background-position: ${th.isOrnament ? 'center' : 'bottom center'}; background-repeat: no-repeat; pointer-events: none;"></div>` : ''}
                         <span style="font-size: 13.5px; font-weight: 500; color: ${th.textColor};">Hello ✨</span>
                       </div>
                     </div>
                   </div>
                   <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-size: 13.5px; font-weight: 500; color: #e4e4e7;">${name}</span>
+                    <span style="font-size: 13.5px; font-weight: 500; color: ${mText};">${safeName}</span>
                     <div class="agy-card-check-slot">${isSelected ? CHECK_SVG : ''}</div>
                   </div>
                 </div>
@@ -1123,8 +1236,8 @@
         </div>
 
         <div style="margin-bottom: 28px;">
-          <div style="font-size: 15px; font-weight: 600; color: #ffffff; margin-bottom: 4px;">Composer Style</div>
-          <div style="font-size: 12.5px; color: #a1a1aa; margin-bottom: 14px;">Customize the chat input frame without affecting keyboard shortcuts or attachments.</div>
+          <div style="font-size: 15px; font-weight: 600; color: ${mHeading}; margin-bottom: 4px;">Composer Style</div>
+          <div style="font-size: 12.5px; color: ${mMuted}; margin-bottom: 14px;">Customize the chat input frame without affecting keyboard shortcuts or attachments.</div>
           <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
             ${Object.entries(INPUT_STYLES).map(([key, item]) => {
               const isSelected = key === st.inputStyle;
@@ -1136,9 +1249,9 @@
                 ? (activeBubbleTh.inputGlassBg || 'rgba(20, 15, 13, 0.45)')
                 : (activeBubbleTh.inputCardBg || 'rgba(26, 18, 15, 0.92)');
               return `
-                <div class="agy-input-card" data-style="${key}" style="border-radius: 12px; border: ${isSelected ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)'}; background: ${isSelected ? 'rgba(42, 34, 30, 0.68)' : 'rgba(14, 12, 12, 0.78)'}; padding: 16px 18px; cursor: pointer; display: flex; flex-direction: column; gap: 12px; transition: border-color 0.15s ease, background-color 0.15s ease;">
+                <div class="agy-input-card" data-style="${key}" style="border-radius: 12px; border: ${isSelected ? mCardSelBorder : '1px solid ' + mBorder}; background: ${isSelected ? mCardSelBg : mCardBg}; padding: 16px 18px; cursor: pointer; display: flex; flex-direction: column; gap: 12px; transition: border-color 0.15s ease, background-color 0.15s ease;">
                   <div class="agy-input-preview-outer" style="position: relative; margin-top: 8px; padding: 1.5px; border-radius: 10px; background: ${key === 'double_gold' ? 'linear-gradient(135deg, #f59e0b, #fbbf24)' : activeBubbleTh.frameBg};">
-                    <div class="agy-input-preview-sticker" style="position: absolute; ${previewStickerStyle} background-image: url('${activeBubbleTh.sticker || ''}'); background-size: contain; background-repeat: no-repeat; display: ${key !== 'minimal' && activeBubbleTh.sticker ? 'block' : 'none'}; pointer-events: none;"></div>
+                    <div class="agy-input-preview-sticker" style="position: absolute; ${previewStickerStyle} background-image: url('${safeCssUrl(activeBubbleTh.sticker || '')}'); background-size: contain; background-repeat: no-repeat; display: ${key !== 'minimal' && activeBubbleTh.sticker ? 'block' : 'none'}; pointer-events: none;"></div>
                     <div class="agy-input-preview-inner" style="background: ${previewInnerBg}; border-radius: 9px; padding: 8px 12px; font-size: 12px; color: #a1a1aa; display: flex; justify-content: space-between; align-items: center;">
                       <span>Ask anything, @ to mention...</span>
                       <span class="agy-input-preview-turbo" style="color: ${activeBubbleTh.primary}; font-size: 11px;">Send →</span>
@@ -1146,8 +1259,8 @@
                   </div>
                   <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div>
-                      <div style="font-size: 13.5px; font-weight: 500; color: #e4e4e7;">${item.label}</div>
-                      <div style="font-size: 11.5px; color: #a1a1aa;">${item.desc}</div>
+                      <div style="font-size: 13.5px; font-weight: 500; color: ${mText};">${escapeHtml(item.label)}</div>
+                      <div style="font-size: 11.5px; color: ${mMuted};">${escapeHtml(item.desc)}</div>
                     </div>
                     <div class="agy-card-check-slot">${isSelected ? CHECK_SVG : ''}</div>
                   </div>
@@ -1158,26 +1271,27 @@
         </div>
 
         <div>
-          <div style="font-size: 15px; font-weight: 600; color: #ffffff; margin-bottom: 4px;">Theme Presets (${THEME_KEYS.length})</div>
-          <div style="font-size: 12.5px; color: #a1a1aa; margin-bottom: 14px;">Complete backdrop, palette, unified L-glass, and matching ornaments.</div>
+          <div style="font-size: 15px; font-weight: 600; color: ${mHeading}; margin-bottom: 4px;">Theme Presets (${THEME_KEYS.length})</div>
+          <div style="font-size: 12.5px; color: ${mMuted}; margin-bottom: 14px;">Complete backdrop, palette, unified L-glass, and matching ornaments.</div>
           <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
             ${THEME_KEYS.map(name => {
               const th = THEMES[name];
+              const safeName = escapeHtml(name);
               const isSelected = name === st.themeName;
               const thumbBg = th.wallpaper
-                ? `linear-gradient(180deg, rgba(0,0,0,0.15), rgba(14,12,12,0.85)), url('${th.wallpaper}')`
+                ? `linear-gradient(180deg, rgba(0,0,0,0.15), rgba(14,12,12,0.85)), url('${safeCssUrl(th.wallpaper)}')`
                 : (th.pureBg || th.bg);
               const thumbOrnamentStyle = th.isOrnament
                 ? 'right: 10px; bottom: 8px; width: 76px; height: 24px; background-position: center;'
                 : 'right: 12px; bottom: 4px; width: 42px; height: 38px; background-position: bottom center;';
               return `
-                <div class="agy-preset-card" data-name="${name}" style="border-radius: 12px; border: ${isSelected ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)'}; background: rgba(14, 12, 12, 0.82); overflow: hidden; cursor: pointer; display: flex; flex-direction: column; transition: border-color 0.15s ease;">
+                <div class="agy-preset-card" data-name="${safeName}" style="border-radius: 12px; border: ${isSelected ? mCardSelBorder : '1px solid ' + mBorder}; background: ${mCardBg}; overflow: hidden; cursor: pointer; display: flex; flex-direction: column; transition: border-color 0.15s ease;">
                   <div style="height: 68px; width: 100%; background-image: ${thumbBg}; background-size: cover; background-position: ${th.bgPosition || 'center'}; position: relative; display: flex; align-items: flex-end; padding: 8px 14px;">
-                    ${th.sticker ? `<div style="position: absolute; ${thumbOrnamentStyle} background-image: url('${th.sticker}'); background-size: contain; background-repeat: no-repeat; pointer-events: none;"></div>` : ''}
-                    <span style="font-size: 13.5px; font-weight: 600; color: #fff;">${name}</span>
+                    ${th.sticker ? `<div style="position: absolute; ${thumbOrnamentStyle} background-image: url('${safeCssUrl(th.sticker)}'); background-size: contain; background-repeat: no-repeat; pointer-events: none;"></div>` : ''}
+                    <span style="font-size: 13.5px; font-weight: 600; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,0.75);">${safeName}</span>
                   </div>
                   <div style="padding: 10px 14px; display: flex; justify-content: space-between; align-items: center;">
-                    <span style="font-size: 12px; color: #a1a1aa;">${th.concept || ''}</span>
+                    <span style="font-size: 12px; color: ${mMuted};">${escapeHtml(th.concept || '')}</span>
                     <div class="agy-card-check-slot">${isSelected ? CHECK_SVG : ''}</div>
                   </div>
                 </div>
@@ -1248,13 +1362,11 @@
     wpUpload.addEventListener('change', (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        applyTheme({ customWp: reader.result, wpEnabled: true });
+      compressWallpaperFile(file, (dataUrl) => {
+        applyTheme({ customWp: dataUrl, wpEnabled: true });
         const toggle = container.querySelector('#agy-wp-toggle');
         if (toggle) toggle.checked = true;
-      };
-      reader.readAsDataURL(file);
+      });
     });
 
     const userAvUpload = container.querySelector('#agy-user-av-upload');
@@ -1422,65 +1534,14 @@
         avatarSize: 32,
         avatarRadius: 50
       });
-      const defTh = THEMES[DEFAULT_THEME_KEY] || {};
-      syncAvPreview(userAvPreview, defTh.userAvatar || '', 'U');
-      syncAvPreview(agentAvPreview, defTh.agentAvatar || '', 'AI');
-      if (userAvPreview) userAvPreview.style.borderRadius = '50%';
-      if (agentAvPreview) agentAvPreview.style.borderRadius = '50%';
-      if (slider) slider.value = 69;
-      if (valLabel) valLabel.textContent = '69%';
-      if (blurSlider) blurSlider.value = 3;
-      if (blurLabel) blurLabel.textContent = '3px';
-      if (avSizeSlider) avSizeSlider.value = 32;
-      if (avSizeVal) avSizeVal.textContent = '32px';
-      if (avRadSlider) avRadSlider.value = 50;
-      if (avRadVal) avRadVal.textContent = '50%';
-      if (wpToggle) wpToggle.checked = true;
-
-      container.querySelectorAll('.agy-preset-card').forEach(c => {
-        const isSel = c.dataset.name === DEFAULT_THEME_KEY;
-        c.style.border = isSel ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)';
-        const slot = c.querySelector('.agy-card-check-slot');
-        if (slot) slot.innerHTML = isSel ? CHECK_SVG : '';
-      });
-      container.querySelectorAll('.agy-bubble-card').forEach(b => {
-        const isSel = b.dataset.name === DEFAULT_THEME_KEY;
-        b.style.border = isSel ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)';
-        b.style.background = isSel ? 'rgba(42, 34, 30, 0.68)' : 'rgba(14, 12, 12, 0.78)';
-        const slot = b.querySelector('.agy-card-check-slot');
-        if (slot) slot.innerHTML = isSel ? CHECK_SVG : '';
-      });
-      container.querySelectorAll('.agy-input-card').forEach(c => {
-        const isSel = c.dataset.style === 'sync';
-        c.style.border = isSel ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)';
-        c.style.background = isSel ? 'rgba(42, 34, 30, 0.68)' : 'rgba(14, 12, 12, 0.78)';
-        const slot = c.querySelector('.agy-card-check-slot');
-        if (slot) slot.innerHTML = isSel ? CHECK_SVG : '';
-      });
-      updateInputPreviews(DEFAULT_THEME_KEY);
+      renderThemePanels(container);
     });
 
     container.querySelectorAll('.agy-preset-card').forEach(card => {
       card.addEventListener('click', () => {
         const name = card.dataset.name;
         applyTheme({ themeName: name, bubbleName: name, customWp: '' });
-
-        container.querySelectorAll('.agy-preset-card').forEach(c => {
-          const isSel = c.dataset.name === name;
-          c.style.border = isSel ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)';
-          const slot = c.querySelector('.agy-card-check-slot');
-          if (slot) slot.innerHTML = isSel ? CHECK_SVG : '';
-        });
-
-        container.querySelectorAll('.agy-bubble-card').forEach(b => {
-          const isSel = b.dataset.name === name;
-          b.style.border = isSel ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)';
-          b.style.background = isSel ? 'rgba(42, 34, 30, 0.68)' : 'rgba(14, 12, 12, 0.78)';
-          const slot = b.querySelector('.agy-card-check-slot');
-          if (slot) slot.innerHTML = isSel ? CHECK_SVG : '';
-        });
-
-        updateInputPreviews(name);
+        renderThemePanels(container);
       });
     });
 
@@ -1491,8 +1552,8 @@
 
         container.querySelectorAll('.agy-bubble-card').forEach(b => {
           const isSel = b.dataset.name === name;
-          b.style.border = isSel ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)';
-          b.style.background = isSel ? 'rgba(42, 34, 30, 0.68)' : 'rgba(14, 12, 12, 0.78)';
+          b.style.border = isSel ? mCardSelBorder : ('1px solid ' + mBorder);
+          b.style.background = isSel ? mCardSelBg : mCardBg;
           const slot = b.querySelector('.agy-card-check-slot');
           if (slot) slot.innerHTML = isSel ? CHECK_SVG : '';
         });
@@ -1508,8 +1569,8 @@
 
         container.querySelectorAll('.agy-input-card').forEach(c => {
           const isSel = c.dataset.style === styleKey;
-          c.style.border = isSel ? '1.5px solid #f4f4f5' : '1px solid rgba(255, 255, 255, 0.12)';
-          c.style.background = isSel ? 'rgba(42, 34, 30, 0.68)' : 'rgba(14, 12, 12, 0.78)';
+          c.style.border = isSel ? mCardSelBorder : ('1px solid ' + mBorder);
+          c.style.background = isSel ? mCardSelBg : mCardBg;
           const slot = c.querySelector('.agy-card-check-slot');
           if (slot) slot.innerHTML = isSel ? CHECK_SVG : '';
         });
@@ -1567,11 +1628,13 @@
       if (child.id === 'agy-custom-theme-settings-btn') child.remove();
     });
 
+    const activeSt = getState();
+    const activeTh = THEMES[activeSt.themeName] || THEMES[DEFAULT_THEME_KEY] || {};
     const btn = document.createElement('button');
     btn.id = 'agy-custom-theme-settings-btn';
     btn.type = 'button';
-    btn.className = 'select-none rounded px-3 py-1.5 text-sm font-medium transition-colors cursor-pointer text-white';
-    btn.style.cssText = 'background: linear-gradient(135deg, #e08e55 0%, #b45309 100%); border: 1px solid rgba(251, 191, 36, 0.4); box-shadow: 0 2px 10px rgba(224, 142, 85, 0.3); margin-top: 8px; margin-bottom: 8px; display: inline-flex; align-items: center; gap: 6px;';
+    btn.className = 'select-none rounded px-3 py-1.5 text-sm font-medium transition-colors cursor-pointer';
+    btn.style.cssText = `background: ${activeTh.btnBg || 'rgba(15, 30, 58, 0.72)'}; color: ${activeTh.isLight ? '#0f172a' : '#f8fafc'}; border: 1px solid ${activeTh.borderColor || 'rgba(255, 255, 255, 0.25)'}; box-shadow: 0 2px 10px ${activeTh.glow || 'rgba(0, 0, 0, 0.25)'}; margin-top: 8px; margin-bottom: 8px; display: inline-flex; align-items: center; gap: 6px;`;
     btn.innerHTML = `
       <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
       <span>Open Custom Theme Studio</span>
@@ -1667,12 +1730,20 @@
       shell.dataset.agyTboMounted = '1';
       scheduleTitleBarSync();
     }
+    if (window.__AGY_LAST_GLASS__ && window.__AGY_LAST_GLASS__.url && !shell.style.getPropertyValue('--agy-l-glass-bg')) {
+      shell.style.setProperty('--agy-l-glass-bg', 'url("' + window.__AGY_LAST_GLASS__.url + '")');
+    }
     if (!window.__AGY_SHELL_RO__ && typeof ResizeObserver !== 'undefined') {
       const ro = new ResizeObserver(syncShellMetrics);
       ro.observe(shell);
-      const sidebarPane = shell.querySelector('[data-testid="sidebar-split"]')?.firstElementChild;
-      if (sidebarPane) ro.observe(sidebarPane);
       window.__AGY_SHELL_RO__ = ro;
+    }
+    if (window.__AGY_SHELL_RO__) {
+      const sidebarPane = shell.querySelector('[data-testid="sidebar-split"]')?.firstElementChild;
+      if (sidebarPane && window.__AGY_SIDEBAR_PANE_EL__ !== sidebarPane) {
+        try { window.__AGY_SHELL_RO__.observe(sidebarPane); } catch (e) {}
+        window.__AGY_SIDEBAR_PANE_EL__ = sidebarPane;
+      }
     }
     syncShellMetrics();
   }
@@ -1692,45 +1763,58 @@
     });
   }
 
-  clearTitleBarTimers();
-  if (window.__AGY_TICK_RAF__) {
-    cancelAnimationFrame(window.__AGY_TICK_RAF__);
-    window.__AGY_TICK_RAF__ = 0;
-  }
-  if (window.__AGY_SHELL_RO__) {
-    try { window.__AGY_SHELL_RO__.disconnect(); } catch (e) {}
-    window.__AGY_SHELL_RO__ = null;
-  }
-  if (window.__AGY_SCROLL_AC__) {
-    try { window.__AGY_SCROLL_AC__.abort(); } catch (e) {}
-  }
-  window.__AGY_SCROLL_AC__ = new AbortController();
-  window.addEventListener('load', () => scheduleTitleBarSync(), { signal: window.__AGY_SCROLL_AC__.signal });
-  window.addEventListener('focus', () => syncTitleBarOverlay(), { signal: window.__AGY_SCROLL_AC__.signal });
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) syncTitleBarOverlay();
-  }, { signal: window.__AGY_SCROLL_AC__.signal });
-  document.querySelectorAll('[data-agy-scroll-bound]').forEach(el => delete el.dataset.agyScrollBound);
-  document.querySelectorAll('[data-agy-tbo-mounted]').forEach(el => delete el.dataset.agyTboMounted);
-  const staleBackdrop = document.getElementById('agy-custom-theme-modal-backdrop');
-  if (staleBackdrop) staleBackdrop.remove();
-  const staleSidebarBtn = document.getElementById('agy-custom-theme-sidebar-btn');
-  if (staleSidebarBtn) staleSidebarBtn.remove();
-  const staleSettingsBtn = document.getElementById('agy-custom-theme-settings-btn');
-  if (staleSettingsBtn) staleSettingsBtn.remove();
+  function boot() {
+    clearTitleBarTimers();
+    if (window.__AGY_TICK_RAF__) {
+      cancelAnimationFrame(window.__AGY_TICK_RAF__);
+      window.__AGY_TICK_RAF__ = 0;
+    }
+    if (window.__AGY_SHELL_RO__) {
+      try { window.__AGY_SHELL_RO__.disconnect(); } catch (e) {}
+      window.__AGY_SHELL_RO__ = null;
+    }
+    if (window.__AGY_SCROLL_AC__) {
+      try { window.__AGY_SCROLL_AC__.abort(); } catch (e) {}
+    }
+    window.__AGY_SCROLL_AC__ = new AbortController();
+    window.addEventListener('load', () => scheduleTitleBarSync(), { signal: window.__AGY_SCROLL_AC__.signal });
+    window.addEventListener('focus', () => syncTitleBarOverlay(), { signal: window.__AGY_SCROLL_AC__.signal });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) syncTitleBarOverlay();
+    }, { signal: window.__AGY_SCROLL_AC__.signal });
+    document.querySelectorAll('[data-agy-scroll-bound]').forEach(el => delete el.dataset.agyScrollBound);
+    document.querySelectorAll('[data-agy-tbo-mounted]').forEach(el => delete el.dataset.agyTboMounted);
+    const staleBackdrop = document.getElementById('agy-custom-theme-modal-backdrop');
+    if (staleBackdrop) staleBackdrop.remove();
+    const staleSidebarBtn = document.getElementById('agy-custom-theme-sidebar-btn');
+    if (staleSidebarBtn) staleSidebarBtn.remove();
+    const staleSettingsBtn = document.getElementById('agy-custom-theme-settings-btn');
+    if (staleSettingsBtn) staleSettingsBtn.remove();
 
-  window.__AGY_HOLE_EL__ = null;
-  if (window.__AGY_MODAL_OBSERVER__) {
-    window.__AGY_MODAL_OBSERVER__.disconnect();
+    window.__AGY_HOLE_EL__ = null;
+    window.__AGY_SIDE_EL__ = null;
+    window.__AGY_SIDEBAR_PANE_EL__ = null;
+    applyTheme();
+    if (window.__AGY_MODAL_OBSERVER__) {
+      window.__AGY_MODAL_OBSERVER__.disconnect();
+    }
+    if (document.body) {
+      window.__AGY_MODAL_OBSERVER__ = new MutationObserver(scheduleTick);
+      window.__AGY_MODAL_OBSERVER__.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-has-browser-hole', 'data-browser-hole']
+      });
+    }
+    tick();
   }
-  window.__AGY_MODAL_OBSERVER__ = new MutationObserver(scheduleTick);
-  window.__AGY_MODAL_OBSERVER__.observe(document.body, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ['data-has-browser-hole', 'data-browser-hole']
-  });
-  tick();
+
+  if (document.body && (document.head || document.documentElement)) {
+    boot();
+  } else {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  }
 
   return 'Antigravity Custom Theme Engine Ready!';
 })();

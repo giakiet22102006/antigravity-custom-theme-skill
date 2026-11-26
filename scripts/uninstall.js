@@ -112,7 +112,7 @@ function removeAutoStart() {
 
 function fetchJson(url) {
     return new Promise((resolve, reject) => {
-        http.get(url, { timeout: 2000 }, (res) => {
+        const req = http.get(url, { timeout: 2000 }, (res) => {
             let body = '';
             res.on('data', (c) => {
                 body += c;
@@ -124,7 +124,9 @@ function fetchJson(url) {
                     reject(err);
                 }
             });
-        }).on('error', reject);
+        });
+        req.on('timeout', () => req.destroy(new Error('HTTP timeout')));
+        req.on('error', reject);
     });
 }
 
@@ -181,9 +183,12 @@ async function clearOpenPages() {
 
     try {
         const targets = await fetchJson(`http://127.0.0.1:${port}/json`);
-        const pages = (Array.isArray(targets) ? targets : []).filter(
-            (t) => t && t.type === 'page' && t.webSocketDebuggerUrl && String(t.url || '').includes('127.0.0.1')
-        );
+        const pages = (Array.isArray(targets) ? targets : []).filter((t) => {
+            if (!t || t.type !== 'page' || !t.webSocketDebuggerUrl) return false;
+            const url = String(t.url || '');
+            if (url.startsWith('devtools://') || url.startsWith('chrome-extension://')) return false;
+            return url.includes('127.0.0.1') || url.includes('workbench') || url.includes('launchpad');
+        });
         for (const p of pages) {
             await cleanupPage(p.webSocketDebuggerUrl);
             console.log(`[uninstall] Cleared theme from page ${p.id}.`);
