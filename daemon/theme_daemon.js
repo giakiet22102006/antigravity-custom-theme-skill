@@ -288,12 +288,23 @@ function createSession(target) {
 }
 
 let isScanning = false;
+let scanTimer = null;
+const SCAN_ACTIVE_MS = 2000;
+const SCAN_IDLE_MS = 4000;
+
+function scheduleNextScan(delayMs) {
+    if (scanTimer) clearTimeout(scanTimer);
+    scanTimer = setTimeout(scanPages, delayMs);
+}
+
 async function scanPages() {
     if (isScanning) return;
     isScanning = true;
+    let nextDelay = SCAN_IDLE_MS;
     try {
     const info = getPortInfo();
     if (!info) return;
+    nextDelay = SCAN_ACTIVE_MS;
 
     if (lastPort !== null && lastPort !== info.port) {
         for (const s of sessions.values()) {
@@ -337,6 +348,7 @@ async function scanPages() {
     }
     } finally {
         isScanning = false;
+        scheduleNextScan(nextDelay);
     }
 }
 
@@ -362,6 +374,7 @@ function watchPayload() {
 
 function shutdown(signal) {
     log(`Shutting down on ${signal}.`);
+    if (scanTimer) clearTimeout(scanTimer);
     for (const s of sessions.values()) {
         try {
             s.ws.close();
@@ -380,4 +393,3 @@ process.on('exit', removePidLock);
 log(`Theme daemon started (PID ${process.pid}, platform=${process.platform}, portFile=${resolvePortFile()}).`);
 watchPayload();
 scanPages();
-setInterval(scanPages, 1500);

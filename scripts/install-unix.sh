@@ -74,6 +74,7 @@ install_macos() {
     <key>ProgramArguments</key>
     <array>
         <string>$node_bin</string>
+        <string>--optimize-for-size</string>
         <string>$DAEMON_JS</string>
     </array>
     <key>WorkingDirectory</key>
@@ -116,7 +117,7 @@ After=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory="$REPO_ROOT"
-ExecStart="$node_bin" "$DAEMON_JS"
+ExecStart="$node_bin" --optimize-for-size "$DAEMON_JS"
 Restart=always
 RestartSec=3
 
@@ -129,7 +130,7 @@ EOF
         echo "[install-unix] systemd user service active: $unit_path"
     else
         echo "[install-unix] systemd --user unavailable; starting background process with nohup."
-        nohup "$node_bin" "$DAEMON_JS" >> "$LOG_FILE" 2>&1 &
+        nohup "$node_bin" --optimize-for-size "$DAEMON_JS" >> "$LOG_FILE" 2>&1 &
         echo "[install-unix] Daemon started (PID $!). Logs: $LOG_FILE"
     fi
 }
@@ -140,7 +141,7 @@ case "$cmd" in
         NODE_BIN="$(find_node)"
         ensure_payload
         stop_existing_pid
-        exec "$NODE_BIN" "$DAEMON_JS"
+        exec "$NODE_BIN" --optimize-for-size "$DAEMON_JS"
         ;;
     stop)
         if [ "$(uname -s)" = "Darwin" ]; then

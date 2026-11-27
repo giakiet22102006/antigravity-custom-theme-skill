@@ -947,7 +947,7 @@
       #agy-custom-theme-sidebar-btn svg {
         color: ${mainTheme.primary} !important;
       }
-    `;
+    `.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s*\n\s*/g, ' ').replace(/\s{2,}/g, ' ').trim();
 
     syncTitleBarOverlay(st);
     scheduleTitleBarSync(st);
@@ -984,9 +984,17 @@
 
   function removeCustomTheme() {
     clearTitleBarTimers();
+    if (window.__AGY_TICK_TIMER__) {
+      clearTimeout(window.__AGY_TICK_TIMER__);
+      window.__AGY_TICK_TIMER__ = 0;
+    }
     if (window.__AGY_TICK_RAF__) {
       cancelAnimationFrame(window.__AGY_TICK_RAF__);
       window.__AGY_TICK_RAF__ = 0;
+    }
+    if (window.__AGY_SHELL_RAF__) {
+      cancelAnimationFrame(window.__AGY_SHELL_RAF__);
+      window.__AGY_SHELL_RAF__ = 0;
     }
     if (window.__AGY_MODAL_OBSERVER__) {
       try { window.__AGY_MODAL_OBSERVER__.disconnect(); } catch (e) {}
@@ -1723,12 +1731,14 @@
     delete shell.dataset.agySideGlass;
   }
 
-  function hookShellMetrics() {
+  function hookShellMetrics(forceSync = false) {
     const shell = document.querySelector('.agy-shell');
     if (!shell) return;
+    let needsSync = forceSync;
     if (!shell.dataset.agyTboMounted) {
       shell.dataset.agyTboMounted = '1';
       scheduleTitleBarSync();
+      needsSync = true;
     }
     if (window.__AGY_LAST_GLASS__ && window.__AGY_LAST_GLASS__.url && !shell.style.getPropertyValue('--agy-l-glass-bg')) {
       shell.style.setProperty('--agy-l-glass-bg', 'url("' + window.__AGY_LAST_GLASS__.url + '")');
@@ -1737,37 +1747,92 @@
       const ro = new ResizeObserver(syncShellMetrics);
       ro.observe(shell);
       window.__AGY_SHELL_RO__ = ro;
+      needsSync = true;
     }
     if (window.__AGY_SHELL_RO__) {
       const sidebarPane = shell.querySelector('[data-testid="sidebar-split"]')?.firstElementChild;
       if (sidebarPane && window.__AGY_SIDEBAR_PANE_EL__ !== sidebarPane) {
         try { window.__AGY_SHELL_RO__.observe(sidebarPane); } catch (e) {}
         window.__AGY_SIDEBAR_PANE_EL__ = sidebarPane;
+        needsSync = true;
       }
     }
-    syncShellMetrics();
+    const holeEl = document.body.getAttribute('data-has-browser-hole') === 'true'
+      ? shell.querySelector('[data-browser-hole]:not([data-browser-hole="false"])')
+      : null;
+    const sideBody = shell.querySelector('[data-side-panel-body="true"]');
+    if (holeEl !== window.__AGY_HOLE_EL__ || sideBody !== window.__AGY_SIDE_EL__) {
+      needsSync = true;
+    }
+    if (needsSync) syncShellMetrics();
   }
 
-  function tick() {
+  function tick(forceShell = false) {
     injectMainSidebarButton();
     injectSettingsModalButton();
     hookSidebarScroll();
-    hookShellMetrics();
+    hookShellMetrics(forceShell);
   }
 
-  function scheduleTick() {
-    if (window.__AGY_TICK_RAF__) return;
-    window.__AGY_TICK_RAF__ = requestAnimationFrame(() => {
-      window.__AGY_TICK_RAF__ = 0;
-      tick();
+  function scheduleShellSync() {
+    if (window.__AGY_SHELL_RAF__) return;
+    window.__AGY_SHELL_RAF__ = requestAnimationFrame(() => {
+      window.__AGY_SHELL_RAF__ = 0;
+      hookShellMetrics(true);
     });
+  }
+
+  // Coalesce rapid React DOM updates (e.g., AI token streaming) to ~5Hz so layout/reflow stays near 0% CPU
+  function scheduleTick() {
+    if (window.__AGY_TICK_TIMER__ || window.__AGY_TICK_RAF__) return;
+    window.__AGY_TICK_TIMER__ = setTimeout(() => {
+      window.__AGY_TICK_TIMER__ = 0;
+      window.__AGY_TICK_RAF__ = requestAnimationFrame(() => {
+        window.__AGY_TICK_RAF__ = 0;
+        tick(false);
+      });
+    }, 200);
+  }
+
+  function onDomMutation(mutations) {
+    let attrChanged = false;
+    let relevantChildChange = false;
+    const sidebarBtnExists = Boolean(document.getElementById('agy-custom-theme-sidebar-btn'));
+    for (let i = 0; i < mutations.length; i++) {
+      const m = mutations[i];
+      if (m.type === 'attributes') {
+        attrChanged = true;
+        break;
+      }
+      if (m.type === 'childList') {
+        const t = m.target;
+        // Skip high-frequency chat token streaming inside agent responses when shell & sidebar button are already mounted
+        if (sidebarBtnExists && t && t.nodeType === 1 && t.closest && t.closest('[data-testid="agent-response"]')) {
+          continue;
+        }
+        relevantChildChange = true;
+      }
+    }
+    if (attrChanged) {
+      scheduleShellSync();
+    } else if (relevantChildChange || !sidebarBtnExists) {
+      scheduleTick();
+    }
   }
 
   function boot() {
     clearTitleBarTimers();
+    if (window.__AGY_TICK_TIMER__) {
+      clearTimeout(window.__AGY_TICK_TIMER__);
+      window.__AGY_TICK_TIMER__ = 0;
+    }
     if (window.__AGY_TICK_RAF__) {
       cancelAnimationFrame(window.__AGY_TICK_RAF__);
       window.__AGY_TICK_RAF__ = 0;
+    }
+    if (window.__AGY_SHELL_RAF__) {
+      cancelAnimationFrame(window.__AGY_SHELL_RAF__);
+      window.__AGY_SHELL_RAF__ = 0;
     }
     if (window.__AGY_SHELL_RO__) {
       try { window.__AGY_SHELL_RO__.disconnect(); } catch (e) {}
@@ -1799,7 +1864,7 @@
       window.__AGY_MODAL_OBSERVER__.disconnect();
     }
     if (document.body) {
-      window.__AGY_MODAL_OBSERVER__ = new MutationObserver(scheduleTick);
+      window.__AGY_MODAL_OBSERVER__ = new MutationObserver(onDomMutation);
       window.__AGY_MODAL_OBSERVER__.observe(document.body, {
         childList: true,
         subtree: true,
@@ -1807,7 +1872,7 @@
         attributeFilter: ['data-has-browser-hole', 'data-browser-hole']
       });
     }
-    tick();
+    tick(true);
   }
 
   if (document.body && (document.head || document.documentElement)) {

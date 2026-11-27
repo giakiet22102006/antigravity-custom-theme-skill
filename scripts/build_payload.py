@@ -12,7 +12,9 @@ import base64
 import io
 import json
 import mimetypes
+import re
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -95,7 +97,23 @@ def resolve_asset_value(value: object, themes_dir: Path, max_dim: int) -> object
     return encode_raster(asset_path, max_dim)
 
 
-def build_payload(themes_path: Path, engine_path: Path, out_path: Path, max_dim: int) -> None:
+def minify_js_safe(src: str) -> str:
+    """Zero-dependency safe whitespace/comment trimmer for engine/core.js."""
+    # Preserve the themes placeholder token while stripping standalone /* ... */ comments.
+    sentinel = "__AGY_KEEP_THEMES_PLACEHOLDER__"
+    work = src.replace(PLACEHOLDER, sentinel, 1)
+    work = re.sub(r"/\*[\s\S]*?\*/", "", work)
+    lines: list[str] = []
+    for raw_line in work.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        lines.append(stripped)
+    return "\n".join(lines).replace(sentinel, PLACEHOLDER, 1)
+
+
+def build_payload(themes_path: Path, engine_path: Path, out_path: Path, max_dim: int, minify: bool = True) -> None:
+    t0 = time.perf_counter()
     if not themes_path.is_file():
         raise FileNotFoundError(f"themes.json not found: {themes_path}")
     if not engine_path.is_file():
@@ -124,15 +142,22 @@ def build_payload(themes_path: Path, engine_path: Path, out_path: Path, max_dim:
             f"Expected exactly 1 '{PLACEHOLDER}' placeholder in {engine_path}, found {count}."
         )
 
-    themes_json = json.dumps(resolved_themes, ensure_ascii=False)
+    raw_engine_kb = len(engine_src.encode("utf-8")) / 1024.0
+    if minify:
+        engine_src = minify_js_safe(engine_src)
+    min_engine_kb = len(engine_src.encode("utf-8")) / 1024.0
+
+    themes_json = json.dumps(resolved_themes, ensure_ascii=False, separators=(",", ":"))
     compiled = engine_src.replace(PLACEHOLDER, themes_json, 1)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(compiled, encoding="utf-8")
 
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
     size_kb = out_path.stat().st_size / 1024.0
     print(
-        f"[build_payload] Built {out_path} ({size_kb:.1f} KB) with {len(resolved_themes)} theme(s): "
+        f"[build_payload] Built {out_path} ({size_kb:.1f} KB, engine {raw_engine_kb:.1f}->{min_engine_kb:.1f} KB) "
+        f"in {elapsed_ms:.0f} ms with {len(resolved_themes)} theme(s): "
         + ", ".join(resolved_themes.keys())
     )
 
@@ -144,9 +169,10 @@ def main() -> int:
     parser.add_argument("--engine", type=Path, default=repo_root / "engine" / "core.js")
     parser.add_argument("--out", type=Path, default=repo_root / "dist" / "theme_payload.js")
     parser.add_argument("--max-dim", type=int, default=DEFAULT_MAX_DIM)
+    parser.add_argument("--no-minify", action="store_true", help="Keep original comments and indentation in core.js")
     args = parser.parse_args()
 
-    build_payload(args.themes, args.engine, args.out, args.max_dim)
+    build_payload(args.themes, args.engine, args.out, args.max_dim, minify=not args.no_minify)
     return 0
 
 

@@ -34,7 +34,9 @@ This resolves `themes/themes.json` + `themes/assets/*` and compiles them with `e
 
 ### 2. Install & Run the Daemon
 
-**Windows (PowerShell):**
+**Windows (1-Click or PowerShell):**
+
+Double-click **`agy-theme.bat`** (automatically builds `dist/theme_payload.js` if missing, patches Antigravity shortcuts, registers Windows Startup, and launches the background daemon), or run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install-win.ps1

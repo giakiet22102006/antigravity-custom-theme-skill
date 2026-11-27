@@ -57,7 +57,7 @@ $EscapedDaemon = $DaemonJs.Replace('"', '""')
 $VbsContent = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$($RepoRoot.Replace('"', '""'))"
-WshShell.Run """$EscapedNode"" ""$EscapedDaemon""", 0, False
+WshShell.Run """$EscapedNode"" --optimize-for-size ""$EscapedDaemon""", 0, False
 "@
 Set-Content -Path $VbsPath -Value $VbsContent -Encoding Unicode
 
